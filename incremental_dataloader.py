@@ -2,6 +2,10 @@
 TaICML incremental learning
 Copyright (c) Jathushan Rajasegaran, 2019
 '''
+import os.path
+import pickle
+from pathlib import Path
+from typing import Any, Callable, Optional, Tuple, Union
 import random
 import numpy as np
 import torch
@@ -16,6 +20,102 @@ from idatasets.omniglot import Omniglot
 from idatasets.celeb_1m import MS1M
 import collections
 from utils.cutout import Cutout
+from transformers import SegformerImageProcessor
+
+
+class Segformer_CIFAR(datasets.CIFAR10):
+    
+    
+    base_folder = "cifar-100-python"
+    url = "https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz"
+    filename = "cifar-100-python.tar.gz"
+    tgz_md5 = "eb9058c3a382ffc7106e4002c42a8d85"
+    train_list = [
+        ["train", "16019d7e3df5f24257cddd939b257f8d"],
+        ]
+    
+    test_list = [
+    ["test", "f0ef6b0ae62326f3e7ffdfab6717acfc"],
+    ]
+    meta = {
+    "filename": "meta",
+    "key": "fine_label_names",
+    "md5": "7973b15100ade9c7d40fb424638fde48",
+    }
+        
+
+    def __init__(
+        self,
+        root: Union[str, Path],
+        train: bool = True,
+        #transform: Optional[Callable] = None,
+        #target_transform: Optional[Callable] = None,
+        download: bool = True,
+            ) -> None:
+        
+        super().__init__(root)
+        
+        self.train = train  # training set or test set
+        
+        if download:
+            self.download()
+        
+        if not self._check_integrity():
+            raise RuntimeError("Dataset not found or corrupted. You can use download=True to download it")
+        
+        if self.train:
+            downloaded_list = self.train_list
+        else:
+            downloaded_list = self.test_list
+        
+        self.data: Any = []
+        self.targets = []
+        
+        # now load the picked numpy arrays
+        for file_name, checksum in downloaded_list:
+            file_path = os.path.join(self.root, self.base_folder, file_name)
+            with open(file_path, "rb") as f:
+                entry = pickle.load(f, encoding="latin1")
+                self.data.append(entry["data"])
+                if "labels" in entry:
+                    self.targets.extend(entry["labels"])
+                else:
+                    self.targets.extend(entry["fine_labels"])
+        
+        self.data = np.vstack(self.data).reshape(-1, 3, 32, 32)
+        self.data = self.data.transpose((0, 2, 3, 1))  # convert to HWC
+        self.processor = SegformerImageProcessor.from_pretrained("nvidia/mit-b0")
+        self._load_meta()
+
+        
+    def __getitem__(self, index: int) -> Tuple[Any, Any]:
+            """
+            Args:
+                index (int): Index
+        
+            Returns:
+                tuple: (image, target) where target is index of the target class.
+            """
+            img, target = self.data[index], self.targets[index]
+        
+            # doing this so that it is consistent with all other datasets
+            
+            # to return a PIL Image
+            img = Image.fromarray(img)
+            
+            pixel_values = self.processor(img, return_tensors="pt").pixel_values
+            #encoded_inputs=encoded_inputs.squeeze()
+            #pixel_values = self.processor(img, return_tensors="pt")#.pixel_values
+            encoding = {
+            "pixel_values": pixel_values.squeeze(),
+            "labels":target,}
+            
+        
+            return encoding   #encoded_inputs, target
+ 
+
+
+
 
 class SubsetRandomSampler(Sampler):
     r"""Samples elements randomly from a given list of indices, without replacement.
@@ -144,8 +244,8 @@ class IncrementalDataset:
         train_indices, for_memory = self.get_same_index(self.train_dataset.targets, list(range(min_class, max_class)), mode="train", memory=memory)
         test_indices, _ = self.get_same_index_test_chunk(self.test_dataset.targets, list(range(max_class)), mode="test")
 
-        self.train_data_loader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self._batch_size,shuffle=False,num_workers=16, sampler=SubsetRandomSampler(train_indices, True))
-        self.test_data_loader = torch.utils.data.DataLoader(self.test_dataset, batch_size=self.args.test_batch,shuffle=False,num_workers=16, sampler=SubsetRandomSampler(test_indices, False))
+        self.train_data_loader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self._batch_size,shuffle=False,num_workers=8, sampler=SubsetRandomSampler(train_indices, True))
+        self.test_data_loader = torch.utils.data.DataLoader(self.test_dataset, batch_size=self.args.test_batch,shuffle=False,num_workers=8, sampler=SubsetRandomSampler(test_indices, False))
 
         
         task_info = {
@@ -207,31 +307,11 @@ class IncrementalDataset:
         self.increments = []
         self.class_order = []
         
-        trsf_train = transforms.Compose(self.train_transforms)
-        try:
-            trsf_mata = transforms.Compose(self.meta_transforms)
-        except:
-            trsf_mata = transforms.Compose(self.train_transforms)
-            
-        trsf_test = transforms.Compose(self.common_transforms)
-        
         current_class_idx = 0  # When using multiple datasets
         for dataset in datasets:
-            if(self.dataset_name=="imagenet"):
-                train_dataset = dataset.base_dataset(root=path, split='train', download=False, transform=trsf_train)
-                test_dataset = dataset.base_dataset(root=path, split='val', download=False, transform=trsf_test)
-                
-            elif(self.dataset_name=="cub200" or self.dataset_name=="cifar100" or self.dataset_name=="mnist"  or self.dataset_name=="caltech101"  or self.dataset_name=="omniglot"  or self.dataset_name=="celeb"):
-                train_dataset = dataset.base_dataset(root=path, train=True, download=True, transform=trsf_train)
-                test_dataset = dataset.base_dataset(root=path, train=False, download=True, transform=trsf_test)
-
-            elif(self.dataset_name=="svhn"):
-                train_dataset = dataset.base_dataset(root=path, split='train', download=True, transform=trsf_train)
-                test_dataset = dataset.base_dataset(root=path, split='test', download=True, transform=trsf_test)
-                train_dataset.targets = train_dataset.labels
-                test_dataset.targets = test_dataset.labels
-                
-                
+            train_dataset = Segformer_CIFAR(root=path, train=True, download=True)
+            test_dataset = Segformer_CIFAR(root=path, train=False, download=True)
+            
             order = [i for i in range(self.args.num_class)]
             if random_order:
                 random.seed(seed)  
@@ -454,4 +534,3 @@ class iOMNIGLOT(DataHandler):
     train_transforms = [ transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,)) ]
     common_transforms = [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
     
-
