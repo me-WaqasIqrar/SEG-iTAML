@@ -1,121 +1,91 @@
-'''
-TaICML incremental learning
-Copyright (c) Jathushan Rajasegaran, 2019
-'''
 import os.path
-import pickle
-from pathlib import Path
-from typing import Any, Callable, Optional, Tuple, Union
 import random
 import numpy as np
 import torch
 from PIL import Image
-from torch.utils.data import DataLoader
 from torch.utils.data.sampler import SubsetRandomSampler
 from torch.utils.data import Sampler
 from torchvision import datasets, transforms
-# from imagenet import ImageNet
-from idatasets.CUB200 import Cub2011
-from idatasets.omniglot import Omniglot
-from idatasets.celeb_1m import MS1M
 import collections
-from utils.cutout import Cutout
 from transformers import SegformerImageProcessor
+from torch.utils.data import Dataset
+from sklearn.model_selection import train_test_split
 
-
-class Segformer_CIFAR(datasets.CIFAR10):
-    
-    
-    base_folder = "cifar-100-python"
-    url = "https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz"
-    filename = "cifar-100-python.tar.gz"
-    tgz_md5 = "eb9058c3a382ffc7106e4002c42a8d85"
-    train_list = [
-        ["train", "16019d7e3df5f24257cddd939b257f8d"],
-        ]
-    
-    test_list = [
-    ["test", "f0ef6b0ae62326f3e7ffdfab6717acfc"],
-    ]
-    meta = {
-    "filename": "meta",
-    "key": "fine_label_names",
-    "md5": "7973b15100ade9c7d40fb424638fde48",
-    }
-        
-
-    def __init__(
-        self,
-        root: Union[str, Path],
-        train: bool = True,
-        #transform: Optional[Callable] = None,
-        #target_transform: Optional[Callable] = None,
-        download: bool = True,
-            ) -> None:
-        
-        super().__init__(root)
-        
-        self.train = train  # training set or test set
-        
-        if download:
-            self.download()
-        
-        if not self._check_integrity():
-            raise RuntimeError("Dataset not found or corrupted. You can use download=True to download it")
-        
-        if self.train:
-            downloaded_list = self.train_list
-        else:
-            downloaded_list = self.test_list
-        
-        self.data: Any = []
+class CustomDataset(Dataset):
+    def __init__(self, root,split="train", test_size=0.2,random_state=42):
+        """
+        Args:
+            root: Directory with all the folders (Handgun & Knife in our case).
+        """
+        self.root_dir = root
+        self.processor =SegformerImageProcessor.from_pretrained("nvidia/mit-b0")
+        self.image_paths = []
+        self.mask_paths = []
         self.targets = []
         
-        # now load the picked numpy arrays
-        for file_name, checksum in downloaded_list:
-            file_path = os.path.join(self.root, self.base_folder, file_name)
-            with open(file_path, "rb") as f:
-                entry = pickle.load(f, encoding="latin1")
-                self.data.append(entry["data"])
-                if "labels" in entry:
-                    self.targets.extend(entry["labels"])
-                else:
-                    self.targets.extend(entry["fine_labels"])
-        
-        self.data = np.vstack(self.data).reshape(-1, 3, 32, 32)
-        self.data = self.data.transpose((0, 2, 3, 1))  # convert to HWC
-        self.processor = SegformerImageProcessor.from_pretrained("nvidia/mit-b0")
-        self._load_meta()
+        self.target_labels = {"Baton": 0,
+                              "Bullet": 1,
+                              "Gun": 2,
+                              "Hammer": 3,
+                              "HandCuffs": 4,
+                              "Knife": 5,
+                              "Lighter": 6,
+                              "Pliers": 7,
+                              "Powerbank": 8,
+                              "Scissors": 9,
+                              "Sprayer": 10,
+                              "Wrench": 11}
 
+        #self.target_labels={"Handgun": 0, "Knife": 1}
         
-    def __getitem__(self, index: int) -> Tuple[Any, Any]:
-            """
-            Args:
-                index (int): Index
-        
-            Returns:
-                tuple: (image, target) where target is index of the target class.
-            """
-            img, target = self.data[index], self.targets[index]
-        
-            # doing this so that it is consistent with all other datasets
+        for folder_name, label in self.target_labels.items():
+            folder_path = os.path.join(root, folder_name)
+            image_folder = os.path.join(folder_path, "images")
+            mask_folder = os.path.join(folder_path, "masks")
             
-            # to return a PIL Image
-            img = Image.fromarray(img)
-            
-            pixel_values = self.processor(img, return_tensors="pt").pixel_values
-            #encoded_inputs=encoded_inputs.squeeze()
-            #pixel_values = self.processor(img, return_tensors="pt")#.pixel_values
-            encoding = {
-            "pixel_values": pixel_values.squeeze(),
-            "labels":target,}
-            
+            for image_name in os.listdir(image_folder):
+                image_path = os.path.join(image_folder, image_name)
+                mask_path = os.path.join(mask_folder, image_name)
+                
+                if os.path.exists(mask_path):  # Ensure mask exists for the image
+                    self.image_paths.append(image_path)
+                    self.mask_paths.append(mask_path)
+                    self.targets.append(label)
         
-            return encoding   #encoded_inputs, target
- 
+        # Split the dataset
+        train_indices, test_indices = train_test_split(
+            list(range(len(self.image_paths))),
+            test_size=test_size,
+            random_state=random_state
+        )
+        indices = train_indices if split == "train" else test_indices
+        
+        self.image_paths = [self.image_paths[i] for i in indices]
+        self.mask_paths = [self.mask_paths[i] for i in indices]
+        self.targets = [self.targets[i] for i in indices]
+        assert len(self.image_paths) == len(self.mask_paths), "Total number of images and masks must be the same."
+        
+    def __len__(self):
+        return len(self.image_paths)
 
-
-
+    def __getitem__(self, idx):
+        target = self.targets[idx]
+        image_path = self.image_paths[idx]
+        mask_path = self.mask_paths[idx]
+        
+        image = Image.open(image_path)#.convert("RGB")
+        mask = Image.open(mask_path)
+        
+        encoded_inputs = self.processor(images=image, segmentation_maps=mask, return_tensors="pt")
+        for k,v in encoded_inputs.items():
+          encoded_inputs[k].squeeze_() # remove batch dimension
+          
+        encoding = {"pixel_values": encoded_inputs["pixel_values"],
+                     "segmentation_map": encoded_inputs["labels"],
+                     "targets":target,
+                                                     }
+        
+        return encoding
 
 class SubsetRandomSampler(Sampler):
     r"""Samples elements randomly from a given list of indices, without replacement.
@@ -154,15 +124,8 @@ class IncrementalDataset:
         validation_split=0.
     ):
         self.dataset_name = dataset_name.lower().strip()
-        datasets = _get_datasets(dataset_name)
-        self.train_transforms = datasets[0].train_transforms 
-        self.common_transforms = datasets[0].common_transforms
-        try:
-            self.meta_transforms = datasets[0].meta_transforms
-        except:
-            self.meta_transforms = datasets[0].train_transforms
+        datasets =    _get_datasets(dataset_name)
         self.args = args
-        
         self._setup_data(
             datasets,
             args.data_path,
@@ -193,9 +156,6 @@ class IncrementalDataset:
                 label_targets.append(target[i])
         for_memory = (label_indices.copy(),label_targets.copy())
         
-#         if(self.args.overflow and not(mode=="test")):
-#             memory_indices, memory_targets = memory
-#             return memory_indices, memory
             
         if memory is not None:
             memory_indices, memory_targets = memory
@@ -237,9 +197,7 @@ class IncrementalDataset:
         print(self.increments)
         min_class = sum(self.increments[:self._current_task])
         max_class = sum(self.increments[:self._current_task + 1])
-#         if(self.args.overflow):
-#             min_class = 0
-#             max_class = sum(self.increments)
+
         
         train_indices, for_memory = self.get_same_index(self.train_dataset.targets, list(range(min_class, max_class)), mode="train", memory=memory)
         test_indices, _ = self.get_same_index_test_chunk(self.test_dataset.targets, list(range(max_class)), mode="test")
@@ -309,8 +267,12 @@ class IncrementalDataset:
         
         current_class_idx = 0  # When using multiple datasets
         for dataset in datasets:
-            train_dataset = Segformer_CIFAR(root=path, train=True, download=True)
-            test_dataset = Segformer_CIFAR(root=path, train=False, download=True)
+            
+            
+            train_dataset = CustomDataset(root=path, split="train" )
+            
+            test_dataset = CustomDataset(root=path, split="test" )
+            
             
             order = [i for i in range(self.args.num_class)]
             if random_order:
@@ -329,6 +291,8 @@ class IncrementalDataset:
 
         self.train_dataset = train_dataset
         self.test_dataset = test_dataset
+      
+
 
     @staticmethod
     def _map_new_class_index(y, order):
@@ -373,25 +337,10 @@ def _get_datasets(dataset_names):
 def _get_dataset(dataset_name):
     dataset_name = dataset_name.lower().strip()
 
-    if dataset_name == "cifar10":
-        return iCIFAR10
-    elif dataset_name == "cifar100":
+    if dataset_name == "cifar100":
         return iCIFAR100
-    elif dataset_name == "imagenet":
-        return iIMAGENET
-    elif dataset_name == "cub200":
-        return iCUB200
-    elif dataset_name == "mnist":
-        return iMNIST
-    elif dataset_name == "caltech101":
-        return iCALTECH101
-    elif dataset_name == "celeb":
-        return iCELEB
-    elif dataset_name == "svhn":
-        return iSVHN
-    elif dataset_name == "omniglot":
-        return iOMNIGLOT
-    
+    elif dataset_name == "baggage":
+        return BAGGAGE
     else:
         raise NotImplementedError("Unknown dataset {}.".format(dataset_name))
 
@@ -404,22 +353,12 @@ class DataHandler:
     class_order = None
 
 
-class iCIFAR10(DataHandler):
-    base_dataset = datasets.cifar.CIFAR10
-    train_transforms = [
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(10),
-        transforms.ColorJitter(brightness=63 / 255),
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-    ]
-    common_transforms = [
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-    ]
 
-
+class BAGGAGE(DataHandler):
+    base_dataset = datasets.cifar.CIFAR100 # no Effect of this codeLine, Used just to complete the check
+    
+    
+    
 class iCIFAR100(DataHandler):
     base_dataset = datasets.cifar.CIFAR100
     train_transforms = [
@@ -434,103 +373,4 @@ class iCIFAR100(DataHandler):
         transforms.ToTensor(),
         transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
     ]
-    
-
-    
-class iCALTECH101(DataHandler):
-    base_dataset = datasets.Caltech101
-    train_transforms = [
-        transforms.Resize(136),
-        transforms.RandomCrop(128, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(10),
-#         transforms.ColorJitter(brightness=63 / 255),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
-    ]
-    
-    common_transforms = [
-        transforms.Resize(130),
-        transforms.CenterCrop(128),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
-    ]
-
-class iCELEB(DataHandler):
-    
-    base_dataset = MS1M
-
-    train_transforms = [
-        transforms.RandomCrop(112, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(10),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
-    ]
-    
-    common_transforms = [
-        transforms.ToTensor(),
-        transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
-    ]
-
-class iIMAGENET(DataHandler):
-    base_dataset = datasets.ImageNet
-    train_transforms = [
-        transforms.Resize(120),
-        transforms.RandomResizedCrop(112),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(10),
-#         transforms.ColorJitter(brightness=63 / 255),
-        transforms.ToTensor(),
-        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-    ]
-    common_transforms = [
-        transforms.Resize(115),
-        transforms.CenterCrop(112),
-        transforms.ToTensor(),
-        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-    ]
-
-
-class iCUB200(DataHandler):
-    base_dataset = Cub2011
-    train_transforms = [
-        transforms.Resize(230),
-        transforms.RandomResizedCrop(224),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(10),
-        transforms.ColorJitter(brightness=63 / 255),
-        transforms.ToTensor(),
-        
-    ]
-    common_transforms = [
-        transforms.Resize(230),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-    ]
-
-    
-class iMNIST(DataHandler):
-    base_dataset = datasets.MNIST
-    train_transforms = [ transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,)) ]
-    common_transforms = [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
-
-class iSVHN(DataHandler):
-    base_dataset = datasets.SVHN
-    train_transforms = [
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(10),
-        transforms.ToTensor(),
-        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-    ]
-    common_transforms = [
-        transforms.ToTensor(),
-        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-    ]
-    
-class iOMNIGLOT(DataHandler):
-    base_dataset = datasets.Omniglot
-    train_transforms = [ transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,)) ]
-    common_transforms = [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
     

@@ -1,0 +1,1 @@
+Loss 	Train Mean IoU 	Test_Loss 	Test_Mean IoU 	
