@@ -20,17 +20,17 @@ import incremental_dataloader as data
 
 class args:
 
-    checkpoint = "results/PIDRAY/Exp3_PIDRAY"
+    checkpoint = "results/STCray/Exp1"
     savepoint = "models/" + "/".join(checkpoint.split("/")[1:])
-    data_path = r"D:/Datasets/PIDRAY/"
-    num_class = 12   #(TOTAL CLASSES==>   num_class=(class_per_task*num_task))
-    class_per_task = 6
-    num_task = 2
+    data_path = r"D:/Datasets/STCray/TrainSet/"
+    num_class = 21   #(TOTAL CLASSES==>   num_class=(class_per_task*num_task))
+    class_per_task = 2
+    num_task = 11
     test_samples_per_class = 100
     dataset = "baggage"
     optimizer = "radam"
     
-    epochs = 15
+    epochs = 21
     lr = 0.001
     train_batch = 4
     test_batch = 4
@@ -86,7 +86,7 @@ def main():
                         increment=args.class_per_task,
                     )
         
-    start_sess = 1
+    start_sess = 0
     memory=None
     
     for ses in range(start_sess, args.num_task):

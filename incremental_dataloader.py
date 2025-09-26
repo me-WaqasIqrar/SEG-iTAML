@@ -23,8 +23,14 @@ class CustomDataset(Dataset):
         self.mask_paths = []
         self.targets = []
         
-        self.target_labels = {"Baton": 0, "Bullet": 1, "Gun": 2, "Hammer": 3, "HandCuffs": 4, "Knife": 5,"Lighter": 6, "Pliers": 7, "Powerbank": 8, "Scissors": 9, "Sprayer": 10, "Wrench": 11}
 
+        self.target_labels = {"3D_Gun": 0, "Battery": 1, "Blade": 2, "Bullet": 3, "Cutter": 4, "Explosive": 5, "Gun": 6, "Hammer": 7, "Handcuffs": 8, "Injection": 9, "Knife": 10, "Lighter": 11, "Multilabel_Threat": 12, "Nail_Cutter": 13,  "Other_Sharp_Item": 14, "Pliers": 15, "Powerbank": 16, "Scissors": 17, "Screwdriver": 18, "Shaving_Razor": 19, "Wrench": 20}
+              
+               
+        #PIDRay
+        #self.target_labels = {"Baton": 0, "Bullet": 1, "Gun": 2, "Hammer": 3, "HandCuffs": 4, "Knife": 5,"Lighter": 6, "Pliers": 7, "Powerbank": 8, "Scissors": 9, "Sprayer": 10, "Wrench": 11}
+                
+        #Baggage
         #self.target_labels={"Handgun": 0, "Knife": 1}
         
         for folder_name, label in self.target_labels.items():
@@ -34,7 +40,9 @@ class CustomDataset(Dataset):
             
             for image_name in os.listdir(image_folder):
                 image_path = os.path.join(image_folder, image_name)
-                mask_path = os.path.join(mask_folder, image_name)
+                
+                base_name, _ = os.path.splitext(image_name)
+                mask_path = os.path.join(mask_folder, base_name + ".png")
                 
                 if os.path.exists(mask_path):  # Ensure mask exists for the image
                     self.image_paths.append(image_path)
