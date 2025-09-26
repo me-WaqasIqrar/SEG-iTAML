@@ -23,18 +23,7 @@ class CustomDataset(Dataset):
         self.mask_paths = []
         self.targets = []
         
-        self.target_labels = {"Baton": 0,
-                              "Bullet": 1,
-                              "Gun": 2,
-                              "Hammer": 3,
-                              "HandCuffs": 4,
-                              "Knife": 5,
-                              "Lighter": 6,
-                              "Pliers": 7,
-                              "Powerbank": 8,
-                              "Scissors": 9,
-                              "Sprayer": 10,
-                              "Wrench": 11}
+        self.target_labels = {"Baton": 0, "Bullet": 1, "Gun": 2, "Hammer": 3, "HandCuffs": 4, "Knife": 5,"Lighter": 6, "Pliers": 7, "Powerbank": 8, "Scissors": 9, "Sprayer": 10, "Wrench": 11}
 
         #self.target_labels={"Handgun": 0, "Knife": 1}
         

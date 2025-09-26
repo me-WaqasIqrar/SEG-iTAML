@@ -48,11 +48,19 @@ class Learner():
             self.optimizer = optim.SGD(meta_parameters, lr=self.args.lr, momentum=0.9, weight_decay=0.001)
  
 
-    def learn(self):
-        logger = Logger(os.path.join(self.args.checkpoint, 'session_'+str(self.args.sess)+'_log.txt'), title=self.title)
-        logger.set_names(['Loss ', 'Train Mean IoU ', 'Test_Loss ', 'Test_Mean IoU '])
-            
-        for epoch in range(0, self.args.epochs):
+    def learn(self, start_epoch=0):
+        log_file= os.path.join(self.args.checkpoint, 'session_'+str(self.args.sess)+'_log.txt')
+        if start_epoch>0 and os.path.exists(log_file):
+            logger = Logger(log_file, title=self.title, resume=True)
+            msg="Resumed "
+            print("\n"+msg+"\n")
+            with open(log_file, 'a') as f:
+                f.write("\n"+msg+"\n")  #log file 
+        else:
+            logger = Logger(os.path.join(self.args.checkpoint, 'session_'+str(self.args.sess)+'_log.txt'), title=self.title)
+            logger.set_names(['Epoch', 'LR', '    Train_Loss ', 'Mean_IoU ', 'Test_Loss ', 'Test_IoU ', 'Best_Acc'])
+        
+        for epoch in range(start_epoch, self.args.epochs):
             self.adjust_learning_rate(epoch)
             print('\nEpoch: [%d | %d] LR: %f Sess: %d' % (epoch + 1, self.args.epochs, self.state['lr'],self.args.sess))
 
@@ -61,8 +69,18 @@ class Learner():
             self.test(self.model)
         
             #append logger file
-            logger.append([ self.train_loss, self.train_acc, self.test_loss, self.test_acc])
 
+            logger.append([int(epoch + 1), self.state['lr'], self.train_loss, self.train_acc, self.test_loss, self.test_acc, self.best_acc])
+
+            checkpoint_state={
+                'epoch': epoch,
+                'sess': self.args.sess,
+                'model_state': self.model.state_dict(),
+                'best_acc': self.best_acc,
+                'optimizer' : self.optimizer.state_dict(), 
+
+            }
+            torch.save(checkpoint_state, os.path.join(self.args.savepoint, f'session_'+str(self.args.sess)+'_last.pth.tar'))
             # save model
             is_best = self.test_acc > self.best_acc
             if(is_best and epoch>self.args.epochs-10):

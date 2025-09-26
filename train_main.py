@@ -20,12 +20,12 @@ import incremental_dataloader as data
 
 class args:
 
-    checkpoint = "results/PIDRAY/Exp2_PIDRAY"
+    checkpoint = "results/PIDRAY/Exp3_PIDRAY"
     savepoint = "models/" + "/".join(checkpoint.split("/")[1:])
-    data_path = r"D:/Datasets/PIDRAY/" 
+    data_path = r"D:/Datasets/PIDRAY/"
     num_class = 12   #(TOTAL CLASSES==>   num_class=(class_per_task*num_task))
-    class_per_task = 2
-    num_task = 6
+    class_per_task = 6
+    num_task = 2
     test_samples_per_class = 100
     dataset = "baggage"
     optimizer = "radam"
@@ -86,7 +86,7 @@ def main():
                         increment=args.class_per_task,
                     )
         
-    start_sess = 3
+    start_sess = 1
     memory=None
     
     for ses in range(start_sess, args.num_task):
@@ -119,8 +119,17 @@ def main():
         
         
         main_learner=Learner(model=model,args=args,trainloader=train_loader, testloader=test_loader, use_cuda=use_cuda)
-        
-        main_learner.learn()
+        resume_path = os.path.join(args.savepoint, f'session_{ses}_last.pth.tar')
+        start_epoch = 0
+        if os.path.exists(resume_path):
+            print(f"=> Resuming from {resume_path}")
+            checkpoint = torch.load(resume_path, weights_only=False,map_location='cuda' if use_cuda else 'cpu')
+            model.load_state_dict(checkpoint['model_state'])
+            main_learner.optimizer.load_state_dict(checkpoint['optimizer'])
+            start_epoch = checkpoint['epoch'] + 1
+            main_learner.best_acc = checkpoint.get('best_acc', 0)
+        main_learner.learn(start_epoch=start_epoch) 
+        #main_learner.learn()
         memory = inc_dataset.get_memory(memory, for_memory)       
         
         acc_task = main_learner.meta_test(main_learner.best_model, memory, inc_dataset)
