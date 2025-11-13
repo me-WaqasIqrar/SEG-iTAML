@@ -24,11 +24,11 @@ class CustomDataset(Dataset):
         self.targets = []
         
 
-        self.target_labels = {"3D_Gun": 0, "Battery": 1, "Blade": 2, "Bullet": 3, "Cutter": 4, "Explosive": 5, "Gun": 6, "Hammer": 7, "Handcuffs": 8, "Injection": 9, "Knife": 10, "Lighter": 11, "Multilabel_Threat": 12, "Nail_Cutter": 13,  "Other_Sharp_Item": 14, "Pliers": 15, "Powerbank": 16, "Scissors": 17, "Screwdriver": 18, "Shaving_Razor": 19, "Wrench": 20}
+        #self.target_labels = {"3D_Gun": 0, "Battery": 1, "Blade": 2, "Bullet": 3, "Cutter": 4, "Explosive": 5, "Gun": 6, "Hammer": 7, "Handcuffs": 8, "Injection": 9, "Knife": 10, "Lighter": 11, "Multilabel_Threat": 12, "Nail_Cutter": 13,  "Other_Sharp_Item": 14, "Pliers": 15, "Powerbank": 16, "Scissors": 17, "Screwdriver": 18, "Shaving_Razor": 19, "Wrench": 20}
               
                
         #PIDRay
-        #self.target_labels = {"Baton": 0, "Bullet": 1, "Gun": 2, "Hammer": 3, "HandCuffs": 4, "Knife": 5,"Lighter": 6, "Pliers": 7, "Powerbank": 8, "Scissors": 9, "Sprayer": 10, "Wrench": 11}
+        self.target_labels = {"Baton": 0, "Bullet": 1, "Gun": 2, "Hammer": 3, "HandCuffs": 4, "Knife": 5,"Lighter": 6, "Pliers": 7, "Powerbank": 8, "Scissors": 9, "Sprayer": 10, "Wrench": 11}
                 
         #Baggage
         #self.target_labels={"Handgun": 0, "Knife": 1}
@@ -370,4 +370,10 @@ class iCIFAR100(DataHandler):
         transforms.ToTensor(),
         transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
     ]
-    
+if __name__ == "__main__":
+    data=CustomDataset(root=r"D:/Datasets/PIDRAY", split="train")
+    print(len(data))
+    sample = data[0]
+    print(sample['pixel_values'].shape)
+    print(sample['segmentation_map'].shape)   
+    print(sample['targets'])    
