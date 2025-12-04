@@ -1,0 +1,24 @@
+{
+  "data_root": "D:/Datasets/PIDRAY",
+  "expected_num_classes": 12,
+  "model_name": "nvidia/mit-b0",
+  "epochs": 50,
+  "batch_size": 16,
+  "lr": 0.001,
+  "weight_decay": 0.01,
+  "output_dir": "./output/Pidray",
+  "save_every": 0,
+  "num_workers": 2,
+  "test_size": 0.2,
+  "random_state": 42,
+  "device": "cuda",
+  "num_classes": 2,
+  "num_labels": 3,
+  "class_names": [
+    "Baton",
+    "Bullet"
+  ],
+  "train_samples": 2600,
+  "test_samples": 651,
+  "start_time": "2025-12-03 16:27:35"
+}

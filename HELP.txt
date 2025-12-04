@@ -1,4 +1,0 @@
-python inference.py \
-  --checkpoint models/Exp2_PIDRAY/session_5_model_best.pth.tar \
-  --image D:/Datasets/PIDRAY/Gun/images/sample.png \
-  --save output.png
