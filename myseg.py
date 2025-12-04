@@ -14,6 +14,8 @@ from torch.nn import CrossEntropyLoss
 from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 from PIL import Image 
 from tqdm import tqdm
+import csv
+from datetime import datetime
 GLOBAL_PROCESSOR = SegformerImageProcessor.from_pretrained("nvidia/mit-b0")
 class SegformerCustomSegDataset(Dataset):
 
@@ -120,6 +122,34 @@ def mIoU(pred,label,num_classes):
             continue
         ious.append(inter / union)
     return float(np.mean(ious)) if ious else 0.0
+
+def log_metrics(log_file, epoch, train_loss, test_loss, test_miou, is_new_file=False):
+    """
+    Log training metrics to a CSV file.
+    
+    Args:
+        log_file: Path to the CSV log file
+        epoch: Current epoch number
+        train_loss: Training loss for this epoch
+        test_loss: Test/validation loss for this epoch
+        test_miou: Test mIoU for this epoch
+        is_new_file: Whether to write header (for new files)
+    """
+    file_exists = os.path.exists(log_file)
+    
+    with open(log_file, 'a', newline='') as f:
+        writer = csv.writer(f)
+        
+        # Write header if file doesn't exist or is_new_file flag is set
+        if not file_exists or is_new_file:
+            writer.writerow(['Timestamp', 'Epoch', 'Train_Loss', 'Test_Loss', 'Test_mIoU'])
+        
+        # Write metrics
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        writer.writerow([timestamp, epoch, f'{train_loss:.6f}', f'{test_loss:.6f}', f'{test_miou:.6f}'])
+    
+    print(f"Logged metrics to {log_file}")
+
 def main():
     #########################
     
@@ -128,8 +158,8 @@ def main():
     batch_size = 8
     learning_rate = 0.0001
     
-    loss_fn = CrossEntropyLoss
     save_path = r"output/mysegformer/best_segformer_model.pt"
+    log_file = os.path.join(os.path.dirname(save_path), "training_log.csv")
 
     ###########################
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -163,16 +193,21 @@ def main():
             optimizer.step()
             total_loss += loss.item()
         
-        print(f"Epoch {epoch} - Loss: {total_loss/len(train_loader):.4f}")
+        avg_train_loss = total_loss / len(train_loader)
+        print(f"Epoch {epoch} - Train Loss: {avg_train_loss:.4f}")
 
         model.eval()
         miou_scores = []
+        test_loss_total = 0.0
         with torch.no_grad():
             for batch in tqdm(test_loader,desc=f"Epoch {epoch}/{num_epochs} [Testing]"):
                 pixel_values = batch["pixel_values"].to(device)
                 labels = batch["seg_map"].to(device)
 
-                logits = model(pixel_values).logits
+                outputs = model(pixel_values=pixel_values, labels=labels)
+                test_loss_total += outputs.loss.item()
+                
+                logits = outputs.logits
                 logits = torch.nn.functional.interpolate(
                     logits, size=labels.shape[1:], mode="bilinear", align_corners=False
                 )
@@ -184,8 +219,14 @@ def main():
                 score = mIoU(pred, gt_mask, num_classes=3)
                 miou_scores.append(score)
         
+        avg_test_loss = test_loss_total / len(test_loader)
         epoch_miou = np.mean(miou_scores)
+        
+        print(f"Test Loss: {avg_test_loss:.4f}")
         print(f"Test mIoU: {epoch_miou:.4f}")
+        
+        # Log metrics to CSV file
+        log_metrics(log_file, epoch, avg_train_loss, avg_test_loss, epoch_miou, is_new_file=(epoch==1))
 
         if epoch_miou > best_miou:
             best_miou = epoch_miou
