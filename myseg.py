@@ -1,7 +1,12 @@
 """
 Author Waqas Iqrar
 This file will take PIDRAY dataset and will train Segformer model for x number of classes segmentation
-Working Fine as of DEC 2025
+Use Dataloader to change the number of classes.
+Working Fine as of DEC 2025.
+Exp_1: only 2 classes segmentation Balton and Bullet
+Exp_2: 5 classes segmentation Balton, Bullet, Capsule, Tablet
+exp_3: gun and Knife Classes
+exp_5: 6 classes 
 """
 
 
@@ -36,9 +41,9 @@ class SegformerCustomSegDataset(Dataset):
         classes = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
         if len(classes)==0:
             raise RuntimeError(f"No Class folder is found in {self.root} ")
-        classes = classes[:2]  # consider only first 2 classes for binary segmentation
-
-
+        classes = classes[:6]  # consider only first 6 classes for segmentation
+        #classes=["Gun","Knife"]
+            
         label2id = {c: i for i, c in enumerate(classes)}
         self.seeClassesvar=label2id
         # Scan and populate images + masks
@@ -124,17 +129,6 @@ def mIoU(pred,label,num_classes):
     return float(np.mean(ious)) if ious else 0.0
 
 def log_metrics(log_file, epoch, train_loss, test_loss, test_miou, is_new_file=False):
-    """
-    Log training metrics to a CSV file.
-    
-    Args:
-        log_file: Path to the CSV log file
-        epoch: Current epoch number
-        train_loss: Training loss for this epoch
-        test_loss: Test/validation loss for this epoch
-        test_miou: Test mIoU for this epoch
-        is_new_file: Whether to write header (for new files)
-    """
     file_exists = os.path.exists(log_file)
     
     with open(log_file, 'a', newline='') as f:
@@ -152,19 +146,21 @@ def log_metrics(log_file, epoch, train_loss, test_loss, test_miou, is_new_file=F
 
 def main():
     #########################
-    
+    Exp="Exp_5"
+    num_claasses=6  # 6 classes 
+    num_labels=num_claasses+1  # +1 for background
     root_dir = r"D:/Datasets/PIDRAY"
-    num_epochs = 20
-    batch_size = 8
+    num_epochs = 50
+    batch_size = 16
     learning_rate = 0.0001
     
-    save_path = r"output/mysegformer/best_segformer_model.pt"
+    save_path = rf"output/mysegformer_{Exp}/best_segformer_model.pt"
     log_file = os.path.join(os.path.dirname(save_path), "training_log.csv")
 
     ###########################
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-    model=SegformerForSemanticSegmentation.from_pretrained("nvidia/mit-b0", num_labels=3)  # 2 classes + background
+    model=SegformerForSemanticSegmentation.from_pretrained("nvidia/mit-b0", num_labels=num_labels)  # 6 classes + background
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
@@ -178,17 +174,27 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     best_miou = 0.0
+    
+    
+    
     for epoch in range(1, num_epochs + 1):
         model.train()
         total_loss=0.0
+        
         for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{num_epochs} [Training] "):
             pixel_values=batch["pixel_values"].to(device)
             seg_map=batch["seg_map"].to(device)
-
+            
+            #forward
             optimizer.zero_grad()
             outputs=model(pixel_values=pixel_values, labels=seg_map)
+            
+            #backward
             loss=outputs.loss
             logits=outputs.logits
+            #print(logits.shape)
+            
+            
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
