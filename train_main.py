@@ -15,36 +15,42 @@ import collections
 
 from util import mkdir_p
 from basic_net import *
+
 from learner_task_itaml import Learner
 import incremental_dataloader as data
 
 class args:
 
-    checkpoint = "results/STCray/Exp1"
+
+    segmentation = True
+
+    checkpoint = "results/PIDRAY/EXP3"
     savepoint = "models/" + "/".join(checkpoint.split("/")[1:])
-    data_path = r"D:/Datasets/STCray/TrainSet/"
-    num_class = 21   #(TOTAL CLASSES==>   num_class=(class_per_task*num_task))
-    class_per_task = 2
-    num_task = 11
+    data_path = "D://Datasets/PIDRAY"
+    num_class = 2       #(TOTAL CLASSES==>   num_class=(class_per_task * num_task))
+    class_per_task = 1
+    num_task = 2
     test_samples_per_class = 100
-    dataset = "baggage"
+    dataset = "custom"
     optimizer = "radam"
     
-    epochs = 21
-    lr = 0.001
-    train_batch = 4
-    test_batch = 4
+    epochs = 1#70
+    lr = 0.0001
+    train_batch = 6
+    test_batch = 6
     workers = 1
     sess = 0
     schedule = [20,40,60]
     gamma = 0.2
     random_classes = False
     validation = 0
-    memory = 5000
+    memory = 3000
     mu = 1
     beta = 1.0
     r = 2
     
+    ignore_index = 255
+
 state = {key:value for key, value in args.__dict__.items() if not key.startswith('__') and not callable(key)}
 print(state)
 
@@ -58,8 +64,9 @@ if use_cuda:
     torch.cuda.manual_seed_all(seed)
 
 def main():
-    
-    model = SegFormerBackbone().cuda()
+
+    model = BasicNet1(args, 0).cuda() 
+
 
     print('  Total params: %.2fM ' % (sum(p.numel() for p in model.parameters())/1000000.0))
 
@@ -67,11 +74,12 @@ def main():
     if not os.path.isdir(args.checkpoint):
         mkdir_p(args.checkpoint)
     if not os.path.isdir(args.savepoint):
-        mkdir_p(args.savepoint) 
+        mkdir_p(args.savepoint)
     np.save(args.checkpoint + "/seed.npy", seed)
     try:
-        shutil.copy2('train_cifar.py', args.checkpoint)
+        shutil.copy2('train_main.py', args.checkpoint)
         shutil.copy2('learner_task_itaml.py', args.checkpoint)
+        shutil.copy2('incremental_dataloader.py', args.checkpoint)  # Copy for reference
     except:
         pass
     inc_dataset = data.IncrementalDataset(
@@ -86,7 +94,7 @@ def main():
                         increment=args.class_per_task,
                     )
         
-    start_sess = 0
+    start_sess = 0  # Start from first task for initial training; change to > 0 when resuming
     memory=None
     
     for ses in range(start_sess, args.num_task):
@@ -94,7 +102,8 @@ def main():
         
         if(ses==0):
             torch.save(model.state_dict(), os.path.join(args.savepoint, 'base_model.pth.tar'))
-            
+            # mask = {}  # Unused variable
+
             
         if(start_sess==ses and start_sess!=0): 
             inc_dataset._current_task = ses
@@ -106,7 +115,7 @@ def main():
         
         if ses>0: 
             path_model=os.path.join(args.savepoint, 'session_'+str(ses-1) + '_model_best.pth.tar')  
-            prev_best=torch.load(path_model,weights_only=False)
+            prev_best=torch.load(path_model)
             model.load_state_dict(prev_best)
             
             with open(args.savepoint + "/memory_"+str(args.sess-1)+".pickle", 'rb') as handle:
@@ -118,18 +127,10 @@ def main():
         args.sample_per_task_testing = inc_dataset.sample_per_task_testing
         
         
+        
         main_learner=Learner(model=model,args=args,trainloader=train_loader, testloader=test_loader, use_cuda=use_cuda)
-        resume_path = os.path.join(args.savepoint, f'session_{ses}_last.pth.tar')
-        start_epoch = 0
-        if os.path.exists(resume_path):
-            print(f"=> Resuming from {resume_path}")
-            checkpoint = torch.load(resume_path, weights_only=False,map_location='cuda' if use_cuda else 'cpu')
-            model.load_state_dict(checkpoint['model_state'])
-            main_learner.optimizer.load_state_dict(checkpoint['optimizer'])
-            start_epoch = checkpoint['epoch'] + 1
-            main_learner.best_acc = checkpoint.get('best_acc', 0)
-        main_learner.learn(start_epoch=start_epoch) 
-        #main_learner.learn()
+        
+        main_learner.learn()
         memory = inc_dataset.get_memory(memory, for_memory)       
         
         acc_task = main_learner.meta_test(main_learner.best_model, memory, inc_dataset)

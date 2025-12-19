@@ -1,22 +1,27 @@
 import os
-import torch
-from util import Bar, Logger, AverageMeter, savefig
-import torch.optim as optim
+import pdb
 import time
-import pickle
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
 import copy
+import torch
+import pickle
 import random
-from torch.nn import CrossEntropyLoss
-import evaluate
+import numpy as np
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+#from resnet import *
 from radam import *
+from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
 
-
-metric = evaluate.load("mean_iou")
-
-
+class ResNet_features(nn.Module):
+    def __init__(self, original_model):
+        super(ResNet_features, self).__init__()
+        self.features = nn.Sequential(*list(original_model.children())[:-1])
+        
+    def forward(self, x):
+        x = self.features(x)
+        return x
+    
 class Learner():
     def __init__(self,model,args,trainloader,testloader, use_cuda):
         self.model=model
@@ -29,8 +34,12 @@ class Learner():
         self.best_acc = 0 
         self.testloader=testloader
         self.test_loss=0.0
+        self.train_acc=0.0
         self.test_acc=0.0
-        self.train_loss, self.train_acc=0.0,0.0       
+        
+        self.test_mIoU=0.0
+        self.train_loss, self.train_mIoU=0.0,0.0
+        self.best_mIoU = 0.0  # Initialize best mIoU for segmentation tracking
         
         meta_parameters = []
         normal_parameters = []
@@ -48,45 +57,31 @@ class Learner():
             self.optimizer = optim.SGD(meta_parameters, lr=self.args.lr, momentum=0.9, weight_decay=0.001)
  
 
-    def learn(self, start_epoch=0):
-        log_file= os.path.join(self.args.checkpoint, 'session_'+str(self.args.sess)+'_log.txt')
-        if start_epoch>0 and os.path.exists(log_file):
-            logger = Logger(log_file, title=self.title, resume=True)
-            msg="Resumed "
-            print("\n"+msg+"\n")
-            with open(log_file, 'a') as f:
-                f.write("\n"+msg+"\n")  #log file 
+    def learn(self):
+        logger = Logger(os.path.join(self.args.checkpoint, 'session_'+str(self.args.sess)+'_log.txt'), title=self.title)
+        # Use mIoU headers for segmentation mode, accuracy headers for classification
+        if getattr(self.args, 'segmentation', False):
+            logger.set_names(['Learning Rate', 'Train Loss', 'Valid Loss', 'Train mIoU', 'Valid mIoU', 'Best mIoU'])
         else:
-            logger = Logger(os.path.join(self.args.checkpoint, 'session_'+str(self.args.sess)+'_log.txt'), title=self.title)
-            logger.set_names(['Epoch', 'LR', '    Train_Loss ', 'Mean_IoU ', 'Test_Loss ', 'Test_IoU ', 'Best_Acc'])
-        
-        for epoch in range(start_epoch, self.args.epochs):
+            logger.set_names(['Learning Rate', 'Train Loss', 'Valid Loss', 'Train Acc.', 'Valid Acc.', 'Best Acc'])
+            
+        for epoch in range(0, self.args.epochs):
             self.adjust_learning_rate(epoch)
             print('\nEpoch: [%d | %d] LR: %f Sess: %d' % (epoch + 1, self.args.epochs, self.state['lr'],self.args.sess))
 
             self.train(self.model, epoch)
-#             if(epoch> self.args.epochs-5):
+            
             self.test(self.model)
         
-            #append logger file
+            # append logger file
+            logger.append([self.state['lr'], self.train_loss, self.test_loss, self.train_mIoU, self.test_mIoU, self.best_mIoU])
 
-            logger.append([int(epoch + 1), self.state['lr'], self.train_loss, self.train_acc, self.test_loss, self.test_acc, self.best_acc])
-
-            checkpoint_state={
-                'epoch': epoch,
-                'sess': self.args.sess,
-                'model_state': self.model.state_dict(),
-                'best_acc': self.best_acc,
-                'optimizer' : self.optimizer.state_dict(), 
-
-            }
-            torch.save(checkpoint_state, os.path.join(self.args.savepoint, f'session_'+str(self.args.sess)+'_last.pth.tar'))
             # save model
-            is_best = self.test_acc > self.best_acc
+            is_best = self.test_mIoU > self.best_mIoU
             if(is_best and epoch>self.args.epochs-10):
                 self.best_model = copy.deepcopy(self.model)
 
-            self.best_acc = max(self.test_acc, self.best_acc)
+            self.best_mIoU = max(self.test_mIoU, self.best_mIoU)
             if(epoch==self.args.epochs-1):
                 self.save_checkpoint(self.best_model.state_dict(), True, checkpoint=self.args.savepoint, filename='session_'+str(self.args.sess)+'_model_best.pth.tar')
         self.model = copy.deepcopy(self.best_model)
@@ -95,383 +90,422 @@ class Learner():
         logger.plot()
         savefig(os.path.join(self.args.checkpoint, 'log.eps'))
 
-        print('Best acc:')
-        print(self.best_acc)
+        print('Best mIoU:')
+        print(self.best_mIoU)
     
     def train(self, model, epoch):
         model.train()
 
         batch_time = AverageMeter()
         data_time = AverageMeter()
-        losses = AverageMeter()
-        meaniou = AverageMeter()
-        top1 = AverageMeter()
         end = time.time()
-        
-        bi = self.args.class_per_task*(1+self.args.sess)
         bar = Bar('Processing', max=len(self.trainloader))
-        
-        for batch_idx, (inputs_dict) in enumerate(self.trainloader):
-            inputs=inputs_dict["pixel_values"]  #dict to variable
-            segmentation_map = inputs_dict["segmentation_map"]  #Segmentation map
-            targets=inputs_dict["targets"]   #Class_labels
-            
-            # measure data loading time
-            data_time.update(time.time() - end)
-            sessions = []
-            
-            targets_one_hot = torch.FloatTensor(inputs.shape[0], bi)
-            targets_one_hot.zero_()
-            targets_one_hot.scatter_(1, targets[:,None], 1)
-            inputs, targets_one_hot, targets = inputs.cuda(), targets_one_hot.cuda(),targets.cuda()
-            segmentation_map=segmentation_map.cuda()
-            
-            reptile_grads = {}            
-            np_targets = targets.detach().cpu().numpy()
-            num_updates = 0
-            
-            outputs2, _ = model(pixel_values=inputs)
-            
-            model_base = copy.deepcopy(model)
-            for task_idx in range(1+self.args.sess):
-                idx = np.where((np_targets>= task_idx*self.args.class_per_task) & (np_targets < (task_idx+1)*self.args.class_per_task))[0]
-                ai = self.args.class_per_task*task_idx
-                bi = self.args.class_per_task*(task_idx+1)
+
+        # segmentation training branch with REPTILE META-UPDATE
+        if getattr(self.args, 'segmentation', False):
+            losses = AverageMeter()
+            iou_meter = AverageMeter()
+
+            for batch_idx, batch in enumerate(self.trainloader):
+                # measure data loading time
+                data_time.update(time.time() - end)
+
+                inputs, seg_maps, targets = batch
+                # seg_maps: segmentation masks with 0=background, 1,2,...=foreground classes
+
+                if self.use_cuda:
+                    inputs = inputs.cuda()
+                    seg_maps = seg_maps.cuda()
+                    targets = targets.cuda() if isinstance(targets, torch.Tensor) else torch.tensor(targets).cuda()
+
                 
-                ii = 0
-                if(len(idx)>0):
-                    sessions.append([task_idx, ii])
-                    ii += 1
-                    for i,(p,q) in enumerate(zip(model.parameters(), model_base.parameters())):
-                        p=copy.deepcopy(q)
-                        
-                    class_inputs = inputs[idx]
-                    class_segmentation_map=segmentation_map[idx]
-                    class_targets_one_hot= targets_one_hot[idx]
+                
+                # Convert targets to 0-indexed for task grouping (subtract 1 since dataloader adds 1)
+                np_targets = (targets - 1).detach().cpu().numpy()  # Now 0-indexed: 0, 1, 2, ...
+                
+                # Storage for task-adapted parameters
+                reptile_grads = {}
+                num_updates = 0
+                
+                # Initial forward pass for metrics (before meta-updates)
+                outputs_initial, _ = model(inputs)
+                
+                # Create base model snapshot (θ⁰) - the reference weights
+                model_base = copy.deepcopy(model)
+                
+                # Loop through all seen tasks (sessions 0 to current session)
+                for task_idx in range(1 + self.args.sess):
+                    # Task classes in 0-indexed targets: task_idx*class_per_task to (task_idx+1)*class_per_task
+                    task_class_start = task_idx * self.args.class_per_task
+                    task_class_end = (task_idx + 1) * self.args.class_per_task
                     
-                        
-                    _, class_outputs = model(class_inputs)
-                    class_pre_ce=class_outputs.clone()
+                    # Find samples belonging to this task
+                    idx = np.where(
+                        (np_targets >= task_class_start) & 
+                        (np_targets < task_class_end)
+                    )[0]
                     
-                    class_upsampled_logits = nn.functional.interpolate(class_outputs, size=segmentation_map.shape[-2:], mode="bilinear", align_corners=False)
-                   
+                    if len(idx) > 0:
+                        # Reset model to base weights before each task adaptation
+                        for p, q in zip(model.parameters(), model_base.parameters()):
+                            p.data.copy_(q.data)
+                        
+                        # Get task-specific samples
+                        task_inputs = inputs[idx]
+                        task_seg_maps = seg_maps[idx]
+                        
+                        # Inner-loop task adaptation (produces θ^t)
+                                        # Number of adaptation steps (controlled by args.r)
+                        num_inner_steps = getattr(self.args, 'r', 1)
+                        
+                        for kr in range(num_inner_steps):
+                            task_logits, _ = model(task_inputs)
+                            
+                            # Compute loss for this task's segmentation
+                            loss = F.cross_entropy(task_logits, task_seg_maps)
+                            
+                            self.optimizer.zero_grad()
+                            loss.backward()
+                            self.optimizer.step()
+                        
+                        # Store task-adapted parameters for all θ^t
+                        for i, p in enumerate(model.parameters()):
+                            if num_updates == 0:
+                                reptile_grads[i] = [p.data.clone()]
+                            else:
+                                reptile_grads[i].append(p.data.clone())
+                        num_updates += 1
+                
+                # CORE META-UPDATE  
+                # θ ← (1-α)·θ⁰ + α·mean(θᵗ)
+                
+                if num_updates > 0:
+                    # Compute meta-learning rate α (decays with session for stability)
+                    alpha = np.exp(-self.args.beta * ((1.0 * self.args.sess) / self.args.num_task))
                     
-                    loss_fct = CrossEntropyLoss()
-                    loss = loss_fct(class_upsampled_logits, class_segmentation_map)
-                    
-                    self.optimizer.zero_grad()
-                    loss.backward()
-                    self.optimizer.step()
-                    
-                    # evaluate                                  
-                    with torch.no_grad():
-                        upsampled_logits = nn.functional.interpolate(class_outputs, size=class_segmentation_map.shape[-2:], mode="bilinear", align_corners=False)
-                        predicted = upsampled_logits.argmax(dim=1)
-                        
-                        
-                        # Add batch to metric
-                        metric.compute(predictions=predicted.detach().cpu().numpy(), references=class_segmentation_map.detach().cpu().numpy(),num_labels=12, #len(id2label),
-                        ignore_index=255,
-                        )
-                        
-                        
-                    metrics = metric._compute(
-                        predictions=predicted.cpu(),
-                        references=class_segmentation_map.cpu(),
-                        num_labels=12, #len(id2label),
-                        ignore_index=255,
-                        reduce_labels=False, 
-                                              )    
-            losses.update(loss.item(), inputs.size(0))
-            meaniou.update(metrics["mean_iou"], inputs.size(0))
-            # measure elapsed time
-            batch_time.update(time.time() - end)
-            end = time.time()
-            
-            # plot progress
-            
-            bar.suffix = '({batch}/{size}) | Total: {total:} | Loss: {loss:.4f} | Mean IoU: {mean_iou:.4f} '.format(
+                    for i, (p, q) in enumerate(zip(model.parameters(), model_base.parameters())):
+                        # Stack all task-adapted weights and compute mean
+                        ll = torch.stack(reptile_grads[i])
+                        # Reptile update: interpolate between base and mean of adapted weights
+                        p.data.copy_(torch.mean(ll, 0) * alpha + (1 - alpha) * q.data)
+                else:
+                    # No meta-update needed (shouldn't happen, but safety fallback)
+                    alpha = 1.0
+                
+                # end of reptile meta-update
+                
+                
+                preds = torch.argmax(outputs_initial, dim=1)
+                final_loss = F.cross_entropy(outputs_initial, seg_maps)
+
+                # compute per-batch mean IoU
+                batch_iou = self._compute_batch_miou(
+                    preds.detach().cpu().numpy(), 
+                    seg_maps.detach().cpu().numpy(), 
+                    num_classes=self.args.num_class + 1, 
+                    ignore_index=getattr(self.args, 'ignore_index', 255)
+                )
+
+                losses.update(final_loss.item(), inputs.size(0))
+                iou_meter.update(batch_iou, inputs.size(0))
+
+                # measure elapsed time
+                batch_time.update(time.time() - end)
+                end = time.time()
+
+                # plot progress
+                bar.suffix = '({batch}/{size}) | Total: {total:} | Loss: {loss:.4f} | mIoU: {miou: .4f} | α: {alpha:.3f}'.format(
                     batch=batch_idx + 1,
                     size=len(self.trainloader),
                     total=bar.elapsed_td,
                     loss=losses.avg,
-                    mean_iou=meaniou.avg
-                                  
-                    )
+                    miou=iou_meter.avg,
+                    alpha=alpha if num_updates > 0 else 1.0
+                )
+                bar.next()
+            bar.finish()
+
+            self.train_loss, self.train_mIoU = losses.avg, iou_meter.avg
             
-            bar.next()
-        bar.finish()
         
-        self.train_loss=losses.avg
-        self.train_acc=meaniou.avg
         
+
     def test(self, model):
 
         batch_time = AverageMeter()
         data_time = AverageMeter()
-        losses = AverageMeter()
-        meaniou = AverageMeter()
-        top1 = AverageMeter()
-        top5 = AverageMeter()
-        class_acc = {}
-        
-        
-        # switch to evaluate mode
-        model.eval()
-        ai = 0
-        bi = self.args.class_per_task*(self.args.sess+1)
-        
         end = time.time()
         bar = Bar('Processing', max=len(self.testloader))
-        for batch_idx, (inputs_dict) in enumerate(self.testloader):
-            # measure data loading time
-            inputs=inputs_dict["pixel_values"]  #dict to variable
-            segmentation_map = inputs_dict["segmentation_map"]  #Segmentation map
-            targets=inputs_dict["targets"]   #Class_labels
-            
-            
-            data_time.update(time.time() - end)
-
-            targets_one_hot = torch.FloatTensor(inputs.shape[0], self.args.num_class)
-            targets_one_hot.zero_()
-            targets_one_hot.scatter_(1, targets[:,None], 1)
-            target_set = np.unique(targets)
-            
-            if self.use_cuda:
-                inputs, targets_one_hot,targets = inputs.cuda(), targets_one_hot.cuda(),targets.cuda()
-                segmentation_map=segmentation_map.cuda()
-            inputs, targets_one_hot, targets = torch.autograd.Variable(inputs), torch.autograd.Variable(targets_one_hot) ,torch.autograd.Variable(targets)
-            outputs2, outputs = model(pixel_values=inputs)
-            
-            upsampled_logits = nn.functional.interpolate(outputs, size=segmentation_map.shape[-2:], mode="bilinear", align_corners=False)
-            loss_fct = CrossEntropyLoss()
-            loss = loss_fct(upsampled_logits, segmentation_map)
-                    
-            # evaluate                                  
-            with torch.no_grad():
-                upsampled_logits = nn.functional.interpolate(outputs, size=segmentation_map.shape[-2:], mode="bilinear", align_corners=False)
-                predicted = upsampled_logits.argmax(dim=1)
-                 
-                # Add batch to metric
-                metric.compute(predictions=predicted.detach().cpu().numpy(), references=segmentation_map.detach().cpu().numpy(),num_labels=12, #len(id2label),
-                ignore_index=255,
-                )
-                 
-            metrics = metric._compute(
-                predictions=predicted.cpu(),
-                references=segmentation_map.cpu(),
-                num_labels=12, #len(id2label),
-                ignore_index=255,
-                reduce_labels=False, 
-                   )
-            losses.update(loss.item(), inputs.size(0))
-            meaniou.update(metrics["mean_iou"], inputs.size(0)) 
-            # plot progress
-            bar.suffix = '({batch}/{size}) | Total: {total:} | Loss: {loss:.4f} | Mean IoU: {mean_iou:.4f} '.format(
-                    batch=batch_idx + 1,
-                    size=len(self.trainloader),
-                    total=bar.elapsed_td,
-                    loss=losses.avg,
-                    mean_iou=meaniou.avg               
-                    )
-            
-            
-            bar.next()
-        bar.finish()
-        self.test_loss= losses.avg
-        self.test_acc= meaniou.avg
-            
-        acc_task = {}
-        for i in range(self.args.sess+1):
-            acc_task[i] = 0
-            for j in range(self.args.class_per_task):
-                try:
-                    acc_task[i] += class_acc[i*self.args.class_per_task+j]/self.args.sample_per_task_testing[i] * 100
-                except:
-                    pass
-        print("\n".join([str(acc_task[k]).format(".4f") for k in acc_task.keys()]) )    
-        print(class_acc)
-
-        
-        with open(self.args.savepoint + "/acc_task_test_"+str(self.args.sess)+".pickle", 'wb') as handle:
-            pickle.dump(acc_task, handle, protocol=pickle.HIGHEST_PROTOCOL)
-        
-    
-    def meta_test(self, model, memory, inc_dataset):
 
         # switch to evaluate mode
         model.eval()
+
+        # segmentation evaluation branch
+        if getattr(self.args, 'segmentation', False):
+            losses = AverageMeter()
+            iou_meter = AverageMeter()
+
+            for batch_idx, batch in enumerate(self.testloader):
+                data_time.update(time.time() - end)
+
+                inputs, seg_maps, targets = batch
+
+                if self.use_cuda:
+                    inputs = inputs.cuda()
+                    seg_maps = seg_maps.cuda()
+                
+                with torch.no_grad():
+                    logits, _ = model(inputs)
+                    # outputs: logits (B, C, H, W)
+
+                    
+                    loss = F.cross_entropy(logits, seg_maps)
+                    preds = torch.argmax(logits, dim=1)
+
+                batch_iou = self._compute_batch_miou(preds.detach().cpu().numpy(), seg_maps.detach().cpu().numpy(), num_classes=self.args.num_class + 1, ignore_index=getattr(self.args, 'ignore_index', 255))
+
+                losses.update(loss.item(), inputs.size(0))
+                iou_meter.update(batch_iou, inputs.size(0))
+
+                batch_time.update(time.time() - end)
+                end = time.time()
+
+                bar.suffix  = '({batch}/{size})  Total: {total:} | Loss: {loss:.4f} | mIoU: {miou: .4f}'.format(
+                            batch=batch_idx + 1,
+                            size=len(self.testloader),
+                            total=bar.elapsed_td,
+                            loss=losses.avg,
+                            miou=iou_meter.avg
+                            )
+                bar.next()
+            bar.finish()
+
+            self.test_loss, self.test_mIoU = losses.avg, iou_meter.avg
+
+            # Save dummy acc_task structure for compatibility
+            acc_task = {i: float(self.test_mIoU) for i in range(self.args.sess+1)}
+            with open(self.args.savepoint + "/acc_task_test_"+str(self.args.sess)+".pickle", 'wb') as handle:
+                pickle.dump(acc_task, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+            return
+    
+    def _compute_batch_miou( self,preds_np, target_np, num_classes, ignore_index=255):
+        """Compute mean IoU for a batch given numpy preds and targets."""
+        ious = []
+        for cls in range(num_classes):
+            if cls == ignore_index:
+                continue
+            inter = 0
+            union = 0
+            for p, t in zip(preds_np, target_np):
+                p_mask = (p == cls)
+                t_mask = (t == cls)
+                inter += int((p_mask & t_mask).sum())
+                union += int((p_mask | t_mask).sum())
+            if union == 0:
+                continue
+            iou = inter / union
+            ious.append(inter / union)
+        if len(ious) == 0:
+            return 0.0
         
-        meta_models = []   
+        return float(np.nanmean(ious))
+
+    def _compute_per_class_iou(self, preds_np, target_np, class_ids, ignore_index=255):
+        """Compute IoU for specific class IDs only (for per-task evaluation)."""
+        ious = {}
+        for cls in class_ids:
+            if cls == ignore_index:
+                continue
+            inter = 0
+            union = 0
+            for p, t in zip(preds_np, target_np):
+                p_mask = (p == cls)
+                t_mask = (t == cls)
+                inter += int((p_mask & t_mask).sum())
+                union += int((p_mask | t_mask).sum())
+            if union == 0:
+                ious[cls] = None  # Class not present in this batch
+            else:
+                ious[cls] = inter / union
+        return ious
+
+    def _meta_test_segmentation(self, model, memory, inc_dataset):
+        """
+        Meta-test for segmentation with per-task fine-tuning (like classification ITAML).
+        
+        For each task:
+        1. Create a copy of the model (meta_model)
+        2. Fine-tune on that task's memory samples (META TRAINING)
+        3. Evaluate on test data for that task's classes
+        """
+        print("\n" + "="*60)
+        print("SEGMENTATION META-TEST: Per-Task Fine-tuning & Evaluation")
+        print("="*60)
+        
+        model.eval()
+
         base_model = copy.deepcopy(model)
-        class_acc = {}
-        meta_task_test_list = {}
-        for task_idx in range(self.args.sess+1):
-            
+        acc_task = {}
+        per_class_iou_all = {}
+        
+        # Get memory data
+        if memory is not None:
             memory_data, memory_target = memory
             memory_data = np.array(memory_data, dtype="int32")
             memory_target = np.array(memory_target, dtype="int32")
+        else:
+            memory_data, memory_target = np.array([]), np.array([])
+        
+        for task_idx in range(self.args.sess + 1):
+            print(f"\n--- Task {task_idx} ---")
             
+            # Get memory indices for this task
+            # Memory targets are class indices (0-indexed for classes, but in segmentation masks they're 1-indexed)
+            # So task 0 has classes 0 to class_per_task-1 in memory_target
+            mem_idx = np.where(
+                (memory_target >= task_idx * self.args.class_per_task) & 
+                (memory_target < (task_idx + 1) * self.args.class_per_task)
+            )[0]
             
-            mem_idx = np.where((memory_target>= task_idx*self.args.class_per_task) & (memory_target < (task_idx+1)*self.args.class_per_task))[0]
-            meta_memory_data = memory_data[mem_idx]
-            meta_memory_target = memory_target[mem_idx]
+            # Create meta model for this task
             meta_model = copy.deepcopy(base_model)
+            # Use the same learning rate as the main training or a specific meta-learning rate
+            meta_lr = self.args.lr 
+            meta_optimizer = optim.Adam(meta_model.parameters(), lr=meta_lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.0, amsgrad=False)
             
-            meta_loader = inc_dataset.get_custom_loader_idx(meta_memory_data, mode="train", batch_size=2)    #64)
-
-            meta_optimizer = optim.Adam(meta_model.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.0, amsgrad=False)
-            
-            meta_model.train()
-            
-            ai = self.args.class_per_task*task_idx
-            bi = self.args.class_per_task*(task_idx+1)
-            bb = self.args.class_per_task*(self.args.sess+1)
-            print("Training meta tasks:\t" , task_idx)
+            # META TRAINING: Fine-tune on task's memory samples
+            if self.args.sess != 0 and len(mem_idx) > 0:
+                meta_memory_data = memory_data[mem_idx]
+                # Use args.train_batch or a smaller batch size for meta-learning
+                meta_batch_size = getattr(self.args, 'train_batch', 16)
+                meta_loader = inc_dataset.get_custom_loader_idx(meta_memory_data, mode="train", batch_size=meta_batch_size)
                 
-            #META training
-            if(self.args.sess!=0):
-                for ep in range(1):
-                    bar = Bar('Processing', max=len(meta_loader))
-                    for batch_idx, (inputs_dict) in enumerate(meta_loader):
-                        inputs=inputs_dict["pixel_values"]    ##dict to variable
-                        segmentation_map=inputs_dict["segmentation_map"]
-                        targets=inputs_dict["targets"]
+                meta_model.train()
+                print(f"  Meta-training on {len(meta_memory_data)} samples...")
+                
+                # Use the same optimizer type as main training if possible, or default to Adam
+                if self.args.optimizer == "radam":
+                    meta_optimizer = RAdam(meta_model.parameters(), lr=meta_lr, betas=(0.9, 0.999), weight_decay=0)
+                elif self.args.optimizer == "sgd":
+                    meta_optimizer = optim.SGD(meta_model.parameters(), lr=meta_lr, momentum=0.9, weight_decay=0.001)
+                else:
+                    meta_optimizer = optim.Adam(meta_model.parameters(), lr=meta_lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.0, amsgrad=False)
+
+                for ep in range(1):  # 1 epoch of fine-tuning
+                    bar = Bar('  Meta-train', max=len(meta_loader))
+                    for batch_idx, batch in enumerate(meta_loader):
+                        # Segmentation data: (inputs, seg_maps, targets)
+                        inputs, seg_maps, targets = batch
                         
-            
-                        targets_one_hot = torch.FloatTensor(inputs.shape[0], (task_idx+1)*self.args.class_per_task)
-                        targets_one_hot.zero_()
-                        targets_one_hot.scatter_(1, targets[:,None], 1)
-                        target_set = np.unique(targets)
-
                         if self.use_cuda:
-                            inputs, targets_one_hot,targets = inputs.cuda(), targets_one_hot.cuda(),targets.cuda()
-                            segmentation_map=segmentation_map.cuda()
-                        inputs, targets_one_hot, targets = torch.autograd.Variable(inputs), torch.autograd.Variable(targets_one_hot) ,torch.autograd.Variable(targets)
-
-                        _, outputs = meta_model(inputs)
-                        class_pre_ce=outputs.clone()
-                        class_pre_ce = class_pre_ce[:, ai:bi]
-                        class_tar_ce=targets_one_hot.clone()
-                        upsampled_outputs = nn.functional.interpolate(outputs, size=segmentation_map.shape[-2:], mode="bilinear", align_corners=False)
-                       
-
-                        #loss = F.binary_cross_entropy_with_logits(outputs[:, ai:bi], segmentation_map)
-                        loss_fct = CrossEntropyLoss()
-                        loss = loss_fct(upsampled_outputs, segmentation_map)
-                                 
-                        #loss = F.binary_cross_entropy_with_logits(class_pre_ce, class_tar_ce[:, ai:bi])
-
+                            inputs = inputs.cuda()
+                            seg_maps = seg_maps.cuda()
+                        
+                        # Zero gradients BEFORE forward pass
                         meta_optimizer.zero_grad()
+                        
+                        # Forward pass
+                        logits, _ = meta_model(inputs)
+                        
+                        # Compute loss only for this task's classes + background
+                        # Task classes in mask: 0 (bg), task_idx*class_per_task+1 to (task_idx+1)*class_per_task
+                        loss = F.cross_entropy(logits, seg_maps)
+                        
                         loss.backward()
                         meta_optimizer.step()
-                        bar.suffix  = '({batch}/{size})  Total: {total:} | Loss: {loss:.4f}'.format(
-                                        batch=batch_idx + 1,
-                                        size=len(meta_loader),
-                                        total=bar.elapsed_td,
-                                        loss=loss)
+                        
+                        bar.suffix = f'Meta-Train ({batch_idx+1}/{len(meta_loader)}) Loss: {loss.item():.4f}'
                         bar.next()
                     bar.finish()
-
+            else:
+                print(f"  No meta-training (sess=0 or no memory for task)")
             
-            #META testing with given knowledge on task
-            meta_model.eval()   
-            for cl in range(self.args.class_per_task):
-                class_idx = cl + self.args.class_per_task*task_idx
-                loader = inc_dataset.get_custom_loader_class([class_idx], mode="test", batch_size=2)   #10)
-
-                for batch_idx, (inputs_dict) in enumerate(loader):
-                    inputs=inputs_dict["pixel_values"]    ##dict to variable
-                    segmentation_map=inputs_dict["segmentation_map"]
-                    targets=inputs_dict["targets"]
-                    
-                    targets_task = targets-self.args.class_per_task*task_idx
-
-                    if self.use_cuda:
-                        inputs, targets_task = inputs.cuda(),targets_task.cuda()
-                        segmentation_map=segmentation_map.cuda()
-                    inputs, targets_task = torch.autograd.Variable(inputs), torch.autograd.Variable(targets_task)
-
-                    _, outputs = meta_model(inputs)
-
-                    if self.use_cuda:
-                        inputs, targets = inputs.cuda(),targets_task.cuda()
-                        segmentation_map=segmentation_map.cuda()
-                    inputs, targets_task = torch.autograd.Variable(inputs), torch.autograd.Variable(targets_task)
-
-                    pred = torch.argmax(outputs[:,ai:bi], 1, keepdim=False)
-                    pred = pred.view(1,-1)
-                    '''correct = pred.eq(targets_task.view(1, -1).expand_as(pred)).view(-1) 
-
-                    correct_k = float(torch.sum(correct).detach().cpu().numpy())
-
-                    for i,p in enumerate(pred.view(-1)):
-                        key = int(p.detach().cpu().numpy())
-                        key = key + self.args.class_per_task*task_idx
-                        if(correct[i]==1):
-                            if(key in class_acc.keys()):
-                                class_acc[key] += 1
-                            else:
-                                class_acc[key] = 1'''
-                                
-
+            # META TESTING: Evaluate on test data
+            meta_model.eval()
             
-#           META testing - no knowledge on task
-            meta_model.eval()   
-            for batch_idx, (inputs_dict) in enumerate(self.testloader):
-                inputs=inputs_dict["pixel_values"]    ##dict to variable
-                segmentation_map=inputs_dict["segmentation_map"]
-                targets=inputs_dict["targets"]
-                
-                if self.use_cuda:
-                    inputs, targets = inputs.cuda(), targets.cuda()
-                    segmentation_map=segmentation_map.cuda()
-                inputs, targets = torch.autograd.Variable(inputs), torch.autograd.Variable(targets)
-                             
-                _, outputs = meta_model(inputs)
-                outputs_base, _ = self.model(inputs)
-                task_ids = outputs
-
-                task_ids = task_ids.detach().cpu()
-                outputs = outputs.detach().cpu()
-                outputs = outputs.detach().cpu()
-                outputs_base = outputs_base.detach().cpu()
-                
-                bs = inputs.size()[0]
-                for i,t in enumerate(list(range(bs))):
-                    j = batch_idx*self.args.test_batch + i
-                    output_base_max = []
-                    for si in range(self.args.sess+1):
-                        sj = outputs_base[i][si* self.args.class_per_task:(si+1)* self.args.class_per_task]
-                        sq = torch.max(sj)
-                        output_base_max.append(sq)
-                   
-                    '''task_argmax = np.argsort(outputs[i][ai:bi])[-5:]
-                    task_max = outputs[i][ai:bi][task_argmax]
+            # Task classes in segmentation masks (1-indexed, 0 is background)
+            task_class_start = task_idx * self.args.class_per_task + 1
+            task_class_end = (task_idx + 1) * self.args.class_per_task + 1
+            task_classes = list(range(task_class_start, task_class_end))
+            
+            # Collect predictions for evaluation
+            all_preds = []
+            all_targets = []
+            
+            with torch.no_grad():
+                bar = Bar('  Evaluating_meta', max=len(self.testloader))
+                for batch_idx, batch in enumerate(self.testloader):
+                    inputs, seg_maps, targets = batch
                     
-                    if ( j not in meta_task_test_list.keys()):
-                        meta_task_test_list[j] = [[task_argmax,task_max, output_base_max,targets[i]]]
-                    else:
-                        meta_task_test_list[j].append([task_argmax,task_max, output_base_max,targets[i]])
-            del meta_model
-                                
-        acc_task = {}
-        for i in range(self.args.sess+1):
-            acc_task[i] = 0
-            for j in range(self.args.class_per_task):
-                try:
-                    acc_task[i] += class_acc[i*self.args.class_per_task+j]/self.args.sample_per_task_testing[i] * 100
-                except:
-                    pass
-        print("\n".join([str(acc_task[k]).format(".4f") for k in acc_task.keys()]) )    
-        print(class_acc)
+                    if self.use_cuda:
+                        inputs = inputs.cuda()
+                        seg_maps = seg_maps.cuda()
+                    
+                    logits, _ = meta_model(inputs)
+                    preds = torch.argmax(logits, dim=1)
+                    
+                    all_preds.append(preds.detach().cpu().numpy())
+                    all_targets.append(seg_maps.detach().cpu().numpy())
+                    
+                    bar.next()
+                bar.finish()
+            
+            all_preds = np.concatenate(all_preds, axis=0)
+            all_targets = np.concatenate(all_targets, axis=0)
+            
+            # Compute IoU for this task's classes
+            eval_classes = [0] + task_classes  # Include background
+            task_ious = self._compute_per_class_iou(
+                all_preds, all_targets, 
+                eval_classes, 
+                ignore_index=getattr(self.args, 'ignore_index', 255)
+            )
+            
+            # Store per-class IoU
+            for cls, iou in task_ious.items():
+                per_class_iou_all[cls] = iou
+            
+            # Compute mean IoU for this task (excluding background)
+            task_class_ious = [task_ious[c] for c in task_classes if task_ious.get(c) is not None]
+            if len(task_class_ious) > 0:
+                acc_task[task_idx] = float(np.mean(task_class_ious)) * 100
+            else:
+                acc_task[task_idx] = 0.0
+            
+            print(f"  Task {task_idx} classes {task_classes}:")
+            for cls in task_classes:
+                iou = task_ious.get(cls)
+                if iou is not None:
+                    print(f"    Class {cls}: IoU = {iou:.4f}")
+                else:
+                    print(f"    Class {cls}: IoU = N/A")
+            print(f"  Task mIoU: {acc_task[task_idx]:.2f}%")
+            
+            del meta_model  # Free memory
         
-        with open(self.args.savepoint + "/meta_task_test_list_"+str(task_idx)+".pickle", 'wb') as handle:
-            pickle.dump(meta_task_test_list, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-        return acc_task  '''
+        # Overall summary
+        all_class_ious = [iou for cls, iou in per_class_iou_all.items() if cls != 0 and iou is not None]
+        overall_miou = float(np.mean(all_class_ious)) * 100 if all_class_ious else 0.0
         
+        print(f"\n{'='*60}")
+        print(f"Overall mIoU (all tasks): {overall_miou:.2f}%")
+        print(f"Per-task mIoU: {[f'{acc_task[k]:.2f}%' for k in sorted(acc_task.keys())]}")
+        print(f"{'='*60}\n")
+        
+        # Save per-class IoU details
+        with open(self.args.savepoint + "/per_class_iou_"+str(self.args.sess)+".pickle", 'wb') as handle:
+            pickle.dump(per_class_iou_all, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        
+        return acc_task
 
+    def meta_test(self, model, memory, inc_dataset):
+        
+        if getattr(self.args, 'segmentation', False):
+            return self._meta_test_segmentation(model, memory, inc_dataset)
+        else:
+            raise NotImplementedError("Meta-test for non-segmentation not implemented in this snippet.")
+        
     def get_memory(self, memory, for_memory, seed=1):
         random.seed(seed)
         memory_per_task = self.args.memory // ((self.args.sess+1)*self.args.class_per_task)
@@ -511,3 +545,23 @@ class Learner():
             self.state['lr'] *= self.args.gamma
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = self.state['lr']
+
+if __name__ == '__main__':
+    def test_miou_computation():    
+        preds = np.array([     [ [0, 1],[2, 0]   ]  , [  [1, 0],[2, 0]  ]   ])
+
+        targets = np.array([
+        [[0, 1],
+        [2, 0]],
+
+        [[1, 0],
+        [2, 0]]
+    ])
+
+        num_classes = 3
+        print("Predictions:\n", preds)
+        print("Targets:\n", targets)
+        print()
+        miou = Learner._compute_batch_miou( preds, targets, num_classes)
+
+        print("\nFinal mIoU:", miou)

@@ -1,88 +1,123 @@
-import os.path
-import random
-import numpy as np
+import os
 import torch
-from PIL import Image
-from torch.utils.data.sampler import SubsetRandomSampler
-from torch.utils.data import Sampler
-from torchvision import datasets, transforms
+import random
 import collections
-from transformers import SegformerImageProcessor
-from torch.utils.data import Dataset
-from sklearn.model_selection import train_test_split
+import numpy as np
 
-class CustomDataset(Dataset):
-    def __init__(self, root,split="train", test_size=0.2,random_state=42):
-        """
-        Args:
-            root: Directory with all the folders (Handgun & Knife in our case).
-        """
-        self.root_dir = root
-        self.processor =SegformerImageProcessor.from_pretrained("nvidia/mit-b0")
+from PIL import Image
+from torch.utils.data import Sampler
+from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+from transformers import SegformerImageProcessor
+from sklearn.model_selection import train_test_split
+from torch.utils.data.sampler import SubsetRandomSampler
+
+GLOBAL_PROCESSOR = SegformerImageProcessor.from_pretrained("nvidia/mit-b2")
+
+class SegformerCustomSegDataset(Dataset):
+
+    def __init__(self, args, root, train=True, test_size=0.2, random_state=42, transform=None, download=False, processor=None,background_label=0, ignore_index=255):
+        
+        super().__init__()
+        self.args = args
+        self.root = root
+        self.train = train
+        self.test_size = test_size
+        self.random_state = random_state
+        self.processor = processor if processor else GLOBAL_PROCESSOR
+        self.background_label = background_label
+        self.ignore_index = ignore_index
+        
         self.image_paths = []
         self.mask_paths = []
+        self.labels = []
+
+
+        classes = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
+        
+        classes = ["Gun", "Knife","Hammer","Scissors"] # Manual override as Sir requested for 4 classes.
+        classes = ["Gun", "Knife"]  # Manual override as Sir requested for 2 classes.
+        if len(classes)==0:
+            raise RuntimeError(f"No Class folder is found in {self.root}")
+        
+        if len(classes)!= args.num_class:
+            raise RuntimeError(f"Number of classes found in {self.root} is {len(classes)}, which is not equal to num_class={args.num_class} provided in args.")
+        label2id = {c: i for i, c in enumerate(classes)}
+
+        # Scan and populate images + masks
+        for class_name, label in label2id.items():
+            class_dir = os.path.join(root, class_name)
+
+            img_dir = os.path.join(class_dir, "images")
+            mask_dir = os.path.join(class_dir, "masks")
+
+
+            for img_name in os.listdir(img_dir):
+                if img_name.lower().endswith((".jpg", ".png", ".jpeg")):
+                    img_path = os.path.join(img_dir, img_name)
+                    baseimg_name, _ = os.path.splitext(img_name)
+                    mask_path=os.path.join(mask_dir,baseimg_name+ ".png")
+                    
+                    if not os.path.exists(mask_path):
+                        raise RuntimeError(f"Mask missing for {img_path}")
+
+                    self.image_paths.append(img_path)
+                    self.mask_paths.append(mask_path)
+                    self.labels.append(label)
+
+        if len(self.image_paths) == 0:
+            raise RuntimeError(f"No image/mask pairs found under {root}")
+
         self.targets = []
         
+                # Split train/test
+        indices = list(range(len(self.image_paths)))
+        train_idx, test_idx = train_test_split(indices, test_size=self.test_size, random_state=self.random_state)
+        
+        selected_idx = train_idx if train else test_idx
 
-        #self.target_labels = {"3D_Gun": 0, "Battery": 1, "Blade": 2, "Bullet": 3, "Cutter": 4, "Explosive": 5, "Gun": 6, "Hammer": 7, "Handcuffs": 8, "Injection": 9, "Knife": 10, "Lighter": 11, "Multilabel_Threat": 12, "Nail_Cutter": 13,  "Other_Sharp_Item": 14, "Pliers": 15, "Powerbank": 16, "Scissors": 17, "Screwdriver": 18, "Shaving_Razor": 19, "Wrench": 20}
-              
-               
-        #PIDRay
-        self.target_labels = {"Baton": 0, "Bullet": 1, "Gun": 2, "Hammer": 3, "HandCuffs": 4, "Knife": 5,"Lighter": 6, "Pliers": 7, "Powerbank": 8, "Scissors": 9, "Sprayer": 10, "Wrench": 11}
-                
-        #Baggage
-        #self.target_labels={"Handgun": 0, "Knife": 1}
+        self.image_path = [self.image_paths[i] for i in selected_idx]
+        self.mask_path = [self.mask_paths[i] for i in selected_idx]
+        self.label      = [self.labels[i] for i in selected_idx]
         
-        for folder_name, label in self.target_labels.items():
-            folder_path = os.path.join(root, folder_name)
-            image_folder = os.path.join(folder_path, "images")
-            mask_folder = os.path.join(folder_path, "masks")
-            
-            for image_name in os.listdir(image_folder):
-                image_path = os.path.join(image_folder, image_name)
-                
-                base_name, _ = os.path.splitext(image_name)
-                mask_path = os.path.join(mask_folder, base_name + ".png")
-                
-                if os.path.exists(mask_path):  # Ensure mask exists for the image
-                    self.image_paths.append(image_path)
-                    self.mask_paths.append(mask_path)
-                    self.targets.append(label)
         
-        # Split the dataset
-        train_indices, test_indices = train_test_split(
-            list(range(len(self.image_paths))),
-            test_size=test_size,
-            random_state=random_state
-        )
-        indices = train_indices if split == "train" else test_indices
+        # following line will work if--> only background + class_A pixels, not class_B, class_C, etc. in masks img
+        # populating targets for compatibility with IncrementalDataset as in original code
         
-        self.image_paths = [self.image_paths[i] for i in indices]
-        self.mask_paths = [self.mask_paths[i] for i in indices]
-        self.targets = [self.targets[i] for i in indices]
-        assert len(self.image_paths) == len(self.mask_paths), "Total number of images and masks must be the same."
+        self.targets = list(self.label)
         
+        
+        assert len(self.image_path) == len(self.targets) == len(self.mask_path)
+
+
+
     def __len__(self):
-        return len(self.image_paths)
+        return len(self.image_path)
+    
+
 
     def __getitem__(self, idx):
-        target = self.targets[idx]
-        image_path = self.image_paths[idx]
-        mask_path = self.mask_paths[idx]
-        
-        image = Image.open(image_path)#.convert("RGB")
-        mask = Image.open(mask_path)
-        
-        encoded_inputs = self.processor(images=image, segmentation_maps=mask, return_tensors="pt")
-        for k,v in encoded_inputs.items():
-          encoded_inputs[k].squeeze_() # remove batch dimension
-          
-        encoding = {"pixel_values": encoded_inputs["pixel_values"],
-                     "segmentation_map": encoded_inputs["labels"],
-                     "targets":target,
-                                                     }
-        
-        return encoding
+
+        image = Image.open(self.image_path[idx]).convert("RGB")
+        # load mask and map to class ids
+        mask_pil = Image.open(self.mask_path[idx]).convert("L")
+        target = int(self.label[idx])
+
+        # convert mask to numpy and map foreground (>0) to (target+1) while background stays 0
+        mask_np = np.array(mask_pil)
+        mapped_mask = np.where(mask_np > 0, (target + 1), 0).astype(np.uint8)
+
+        # use processor to prepare pixel values and resize segmentation map to model size
+        encoded = self.processor(images=image, segmentation_maps=mapped_mask, return_tensors="pt")
+        # remove batch dim
+        pixel_values = encoded["pixel_values"].squeeze(0)
+        seg_map = encoded["labels"].squeeze(0).long()
+        target=target+1  # because 0 is reserved for background class 
+        # return tuple compatible with DataLoader -> (inputs, seg_map, target_class)
+        return pixel_values, seg_map, target
+
+
 
 class SubsetRandomSampler(Sampler):
     r"""Samples elements randomly from a given list of indices, without replacement.
@@ -121,8 +156,15 @@ class IncrementalDataset:
         validation_split=0.
     ):
         self.dataset_name = dataset_name.lower().strip()
-        datasets =    _get_datasets(dataset_name)
+        datasets = _get_datasets(dataset_name)
+        self.train_transforms = datasets[0].train_transforms 
+        self.common_transforms = datasets[0].common_transforms
+        try:
+            self.meta_transforms = datasets[0].meta_transforms
+        except:
+            self.meta_transforms = datasets[0].train_transforms
         self.args = args
+        
         self._setup_data(
             datasets,
             args.data_path,
@@ -153,6 +195,9 @@ class IncrementalDataset:
                 label_targets.append(target[i])
         for_memory = (label_indices.copy(),label_targets.copy())
         
+#         if(self.args.overflow and not(mode=="test")):
+#             memory_indices, memory_targets = memory
+#             return memory_indices, memory
             
         if memory is not None:
             memory_indices, memory_targets = memory
@@ -194,13 +239,15 @@ class IncrementalDataset:
         print(self.increments)
         min_class = sum(self.increments[:self._current_task])
         max_class = sum(self.increments[:self._current_task + 1])
-
+#         if(self.args.overflow):
+#             min_class = 0
+#             max_class = sum(self.increments)
         
         train_indices, for_memory = self.get_same_index(self.train_dataset.targets, list(range(min_class, max_class)), mode="train", memory=memory)
         test_indices, _ = self.get_same_index_test_chunk(self.test_dataset.targets, list(range(max_class)), mode="test")
 
-        self.train_data_loader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self._batch_size,shuffle=False,num_workers=8, sampler=SubsetRandomSampler(train_indices, True))
-        self.test_data_loader = torch.utils.data.DataLoader(self.test_dataset, batch_size=self.args.test_batch,shuffle=False,num_workers=8, sampler=SubsetRandomSampler(test_indices, False))
+        self.train_data_loader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self._batch_size,shuffle=False,num_workers=16, sampler=SubsetRandomSampler(train_indices, True))
+        self.test_data_loader = torch.utils.data.DataLoader(self.test_dataset, batch_size=self.args.test_batch,shuffle=False,num_workers=16, sampler=SubsetRandomSampler(test_indices, False))
 
         
         task_info = {
@@ -262,15 +309,42 @@ class IncrementalDataset:
         self.increments = []
         self.class_order = []
         
+        trsf_train = transforms.Compose(self.train_transforms)
+        try:
+            trsf_mata = transforms.Compose(self.meta_transforms)
+        except:
+            trsf_mata = transforms.Compose(self.train_transforms)
+            
+        trsf_test = transforms.Compose(self.common_transforms)
+        
         current_class_idx = 0  # When using multiple datasets
         for dataset in datasets:
-            
-            
-            train_dataset = CustomDataset(root=path, split="train" )
-            
-            test_dataset = CustomDataset(root=path, split="test" )
-            
-            
+            if(self.dataset_name=="imagenet"):
+                train_dataset = dataset.base_dataset(root=path, split='train', download=False, transform=trsf_train)
+                test_dataset = dataset.base_dataset(root=path, split='val', download=False, transform=trsf_test)
+                
+            elif(self.dataset_name=="cub200" or self.dataset_name=="cifar100" or self.dataset_name=="mnist"  or self.dataset_name=="caltech101"  or self.dataset_name=="omniglot"  or self.dataset_name=="celeb"):
+                train_dataset = dataset.base_dataset(root=path, train=True, download=True, transform=trsf_train)
+                test_dataset = dataset.base_dataset(root=path, train=False, download=True, transform=trsf_test)
+
+            elif(self.dataset_name=="svhn"):
+                train_dataset = dataset.base_dataset(root=path, split='train', download=True, transform=trsf_train)
+                test_dataset = dataset.base_dataset(root=path, split='test', download=True, transform=trsf_test)
+                train_dataset.targets = train_dataset.labels
+                test_dataset.targets = test_dataset.labels
+            elif (self.dataset_name=="custom"):
+                
+                train_dataset = dataset.base_dataset(root=path, args=self.args, train=True, transform=trsf_train, processor=GLOBAL_PROCESSOR)
+                test_dataset = dataset.base_dataset(root=path, args=self.args, train=False, transform=trsf_test,  processor=GLOBAL_PROCESSOR)    
+
+            self.train_dataset = train_dataset
+            self.test_dataset = test_dataset
+
+
+
+
+
+
             order = [i for i in range(self.args.num_class)]
             if random_order:
                 random.seed(seed)  
@@ -284,12 +358,10 @@ class IncrementalDataset:
                 test_dataset.targets[i] = order[t]
             self.class_order.append(order)
 
-            self.increments = [increment for _ in range(len(order) // increment)]
+            self.increments = [increment for _ in range(len(order) // increment)] # odd=
 
         self.train_dataset = train_dataset
         self.test_dataset = test_dataset
-      
-
 
     @staticmethod
     def _map_new_class_index(y, order):
@@ -334,10 +406,12 @@ def _get_datasets(dataset_names):
 def _get_dataset(dataset_name):
     dataset_name = dataset_name.lower().strip()
 
-    if dataset_name == "cifar100":
+    if dataset_name == "cifar10":
+        return iCIFAR10
+    elif dataset_name == "cifar100":
         return iCIFAR100
-    elif dataset_name == "baggage":
-        return BAGGAGE
+    elif dataset_name == "custom":
+        return iCUSTOM
     else:
         raise NotImplementedError("Unknown dataset {}.".format(dataset_name))
 
@@ -350,12 +424,22 @@ class DataHandler:
     class_order = None
 
 
+class iCIFAR10(DataHandler):
+    base_dataset = datasets.cifar.CIFAR10
+    train_transforms = [
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(10),
+        transforms.ColorJitter(brightness=63 / 255),
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+    ]
+    common_transforms = [
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+    ]
 
-class BAGGAGE(DataHandler):
-    base_dataset = datasets.cifar.CIFAR100 # no Effect of this codeLine, Used just to complete the check
-    
-    
-    
+
 class iCIFAR100(DataHandler):
     base_dataset = datasets.cifar.CIFAR100
     train_transforms = [
@@ -370,10 +454,39 @@ class iCIFAR100(DataHandler):
         transforms.ToTensor(),
         transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
     ]
+    
+
+class iCUSTOM(DataHandler):
+    base_dataset = SegformerCustomSegDataset
+    train_transforms = []
+    test_transforms = []
+    class_order = None
+
+
 if __name__ == "__main__":
-    data=CustomDataset(root=r"D:/Datasets/PIDRAY", split="train")
-    print(len(data))
-    sample = data[0]
-    print(sample['pixel_values'].shape)
-    print(sample['segmentation_map'].shape)   
-    print(sample['targets'])    
+    from types import SimpleNamespace
+    data_root = r"D:/Datasets/PIDRAY"  # point to parent with class subfolders
+
+    # build args minimally required by IncrementalDataset
+    args = SimpleNamespace()
+    args.num_class = len([d for d in os.listdir(os.path.join(data_root)) if os.path.isdir(os.path.join(data_root, d))])
+    args.class_per_task = 2
+    args.memory = 200
+    args.sess = 0
+    args.test_batch = 64
+    args.mu = 1
+    args.dataset_name = "custom"
+    args.data_path = data_root  # IncrementalDataset will call base_dataset(root=args.data_path, train=...)
+    print(args.num_class)
+
+    # instantiate
+    inc = IncrementalDataset(dataset_name="custom", args=args, random_order=False, shuffle=True, workers=1, batch_size=32, seed=123, increment=args.class_per_task)
+
+    # create first task loaders
+    task_info, train_loader, test_loader, _, for_memory = inc.new_task(memory=None)
+    print("task_info:", task_info)
+    # iterate one batch to validate shapes
+    for x, y in train_loader:
+        print("batch x:", type(x), getattr(x, "shape", None), "batch y:", type(y), len(y) if hasattr(y, "__len__") else None)
+        break
+
