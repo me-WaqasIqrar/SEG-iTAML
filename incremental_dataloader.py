@@ -36,8 +36,7 @@ class SegformerCustomSegDataset(Dataset):
 
         classes = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
         
-        classes = ["Gun", "Knife","Hammer","Scissors"] # Manual override as Sir requested for 4 classes.
-        classes = ["Gun", "Knife"]  # Manual override as Sir requested for 2 classes.
+        classes = ["Gun", "Knife","Hammer"]  # Manual override as Sir requested for 2 classes.
         if len(classes)==0:
             raise RuntimeError(f"No Class folder is found in {self.root}")
         
@@ -82,7 +81,8 @@ class SegformerCustomSegDataset(Dataset):
         self.label      = [self.labels[i] for i in selected_idx]
         
         
-        # following line will work if--> only background + class_A pixels, not class_B, class_C, etc. in masks img
+        # following line will work if--> only background + class_A pixels, not class_B, class_C, etc. in masks img 
+        ## for my case it satisfy condition
         # populating targets for compatibility with IncrementalDataset as in original code
         
         self.targets = list(self.label)
@@ -110,11 +110,15 @@ class SegformerCustomSegDataset(Dataset):
 
         # use processor to prepare pixel values and resize segmentation map to model size
         encoded = self.processor(images=image, segmentation_maps=mapped_mask, return_tensors="pt")
+        
         # remove batch dim
+        
         pixel_values = encoded["pixel_values"].squeeze(0)
         seg_map = encoded["labels"].squeeze(0).long()
         target=target+1  # because 0 is reserved for background class 
-        # return tuple compatible with DataLoader -> (inputs, seg_map, target_class)
+        
+        # return  (inputs, seg_map, target_class)
+        
         return pixel_values, seg_map, target
 
 
@@ -358,7 +362,7 @@ class IncrementalDataset:
                 test_dataset.targets[i] = order[t]
             self.class_order.append(order)
 
-            self.increments = [increment for _ in range(len(order) // increment)] # odd=
+            self.increments = [increment for _ in range(len(order) // increment)] 
 
         self.train_dataset = train_dataset
         self.test_dataset = test_dataset
@@ -464,6 +468,7 @@ class iCUSTOM(DataHandler):
 
 
 if __name__ == "__main__":
+    # simple test
     from types import SimpleNamespace
     data_root = r"D:/Datasets/PIDRAY"  # point to parent with class subfolders
 

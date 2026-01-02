@@ -24,20 +24,20 @@ class args:
 
     segmentation = True
 
-    checkpoint = "results/PIDRAY/EXP3"
+    checkpoint = "results/PIDRAY/EXP6.2"
     savepoint = "models/" + "/".join(checkpoint.split("/")[1:])
     data_path = "D://Datasets/PIDRAY"
-    num_class = 2       #(TOTAL CLASSES==>   num_class=(class_per_task * num_task))
+    num_class = 3       #(TOTAL CLASSES==>   num_class=(class_per_task * num_task))
     class_per_task = 1
-    num_task = 2
+    num_task = 3
     test_samples_per_class = 100
     dataset = "custom"
     optimizer = "radam"
     
-    epochs = 1#70
+    epochs = 50
     lr = 0.0001
-    train_batch = 6
-    test_batch = 6
+    train_batch = 2
+    test_batch = 2
     workers = 1
     sess = 0
     schedule = [20,40,60]

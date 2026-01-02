@@ -103,7 +103,7 @@ class BasicNet1(nn.Module):
         
         elif self.args.dataset == "custom":
             # use Segformer as backbone for either image classification or semantic segmentation
-            if getattr(self.args, 'segmentation', False):
+            if getattr(self.args, 'segmentation', False):  # if segmentation task = True in args main.py teh segformer will be used for segmentation
                 
                 # segmentation model: include background label (0) + class labels (1..N)
                 num_labels = self.args.num_class + 1

@@ -374,7 +374,7 @@ class Learner():
             meta_lr = self.args.lr 
             meta_optimizer = optim.Adam(meta_model.parameters(), lr=meta_lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.0, amsgrad=False)
             
-            # META TRAINING: Fine-tune on task's memory samples
+            # META TRAINING: Fine-tune on task's memory samples with class knowledge
             if self.args.sess != 0 and len(mem_idx) > 0:
                 meta_memory_data = memory_data[mem_idx]
                 # Use args.train_batch or a smaller batch size for meta-learning
