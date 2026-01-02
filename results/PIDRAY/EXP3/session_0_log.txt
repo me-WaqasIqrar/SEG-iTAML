@@ -1,0 +1,2 @@
+Learning Rate	Train Loss	Valid Loss	Train mIoU	Valid mIoU	Best mIoU	
+0.000100	0.184118	0.026249	0.650353	0.850210	0.000000	
